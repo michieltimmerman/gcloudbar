@@ -1,0 +1,31 @@
+name: gcloud compatibility
+
+# GcloudBar relies on gcloud behaviour that isn't a public contract (see
+# Sources/GcloudBar/Compat.swift). Run the app's own check against the newest
+# Google Cloud CLI every week, so a gcloud release that breaks something shows up
+# here before users notice.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"   # Mondays 06:17 UTC
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [Sources/GcloudBar/Compat.swift, .github/workflows/gcloud-compat.yml]
+
+jobs:
+  check:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build
+        run: swift build -c release
+
+      - name: Download the newest Google Cloud CLI
+        run: |
+          curl -fsSL https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-darwin-arm.tar.gz \
+            | tar -xz -C "$RUNNER_TEMP"
+
+      - name: Check what GcloudBar relies on
+        run: .build/release/GcloudBar --compat "$RUNNER_TEMP/google-cloud-sdk"

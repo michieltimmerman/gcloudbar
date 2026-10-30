@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Stand-in for gcloud in tests/e2e.sh. Behaviour comes from files in $FAKE_DIR:
+#   account   what `config get account` prints
+#   probe     valid | reauth | revoked | fail   outcome of auth print-access-token
+#   login     ok | hang | fail                  outcome of auth login
+# Every call is appended to calls.log (args) and env.log (the impersonation env it
+# saw), and like real gcloud each writes logs/<day>/<time>.log under CLOUDSDK_CONFIG.
+set -u
+D=${FAKE_DIR:?}
+echo "$*" >> "$D/calls.log"
+echo "impersonate_env=${CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT-<unset>} :: $*" >> "$D/env.log"
+# Real gcloud opens the login page through Python's webbrowser, i.e. $BROWSER.
+echo "browser=${BROWSER-<unset>} :: $*" >> "$D/browser.log"
+
+# Like real gcloud: bin/gcloud execs $CLOUDSDK_PYTHON (exit 127 once it's gone),
+# and without one it falls back to macOS's Python 3.9 and refuses to load.
+if [ -n "${CLOUDSDK_PYTHON:-}" ] && [ ! -x "$CLOUDSDK_PYTHON" ]; then
+    echo "gcloud: line 204: $CLOUDSDK_PYTHON: No such file or directory" >&2
+    exit 127
+fi
+if [ -z "${CLOUDSDK_PYTHON:-}" ]; then
+    echo "ERROR: gcloud failed to load. You are running gcloud with Python 3.9, which is no longer supported by gcloud." >&2
+    exit 1
+fi
+
+day=$(date +%Y.%m.%d)
+mkdir -p "$CLOUDSDK_CONFIG/logs/$day"
+log="$CLOUDSDK_CONFIG/logs/$day/$(date +%H.%M.%S).$(printf '%06d' $((RANDOM * 30))).log"
+running() { echo "$(date '+%F %T'),000 DEBUG    root   Running [gcloud.$1] with arguments: [$2]" >> "$log"; }
+
+case "$1 ${2:-}" in
+"config get")
+    running config.get "$*"
+    cat "$D/account"
+    ;;
+"auth print-access-token" | "config config-helper")
+    running "$1.$2" "$*"
+    # A gcloud without the hidden --scopes flag (the app then falls back to the
+    # documented `config config-helper --force-auth-refresh`).
+    if [ -e "$D/no_scopes" ] && [[ " $* " == *" --scopes="* ]]; then
+        echo "ERROR: (gcloud.auth.print-access-token) unrecognized arguments: --scopes=https://www.googleapis.com/auth/cloud-platform" >&2
+        exit 2
+    fi
+    case $(cat "$D/probe") in
+    valid) echo "ya29.fake-token-never-read" ;;
+    reauth)
+        printf '%s\n' "ERROR: (gcloud.auth.print-access-token) There was a problem refreshing your current auth tokens: Reauthentication failed. cannot prompt during non-interactive execution." \
+            "Please run:" "" '  $ gcloud auth login' "" "to obtain new credentials." >&2
+        exit 1 ;;
+    reauth_reworded)
+        # Same lapse, different wording: only Google's OAuth error code is left.
+        echo "ERROR: (gcloud.auth.print-access-token) Your session has ended: ('invalid_grant: reauth related error (invalid_rapt)', {'error': 'invalid_grant', 'error_subtype': 'invalid_rapt'})" >&2
+        exit 1 ;;
+    revoked)
+        echo "ERROR: (gcloud.auth.print-access-token) There was a problem refreshing your current auth tokens: ('invalid_grant: Token has been expired or revoked.', {'error': 'invalid_grant'})" >&2
+        exit 1 ;;
+    *)
+        echo "ERROR: (gcloud.auth.print-access-token) There was a problem refreshing auth tokens: Unable to find the server at oauth2.googleapis.com" >&2
+        exit 1 ;;
+    esac
+    ;;
+"auth login")
+    running auth.login "$*"
+    echo "Your browser has been opened to visit: https://accounts.google.com/o/oauth2/auth?fake" >&2
+    case $(cat "$D/login") in
+    ok)
+        sleep 0.3
+        echo valid > "$D/probe"
+        # Real gcloud prints this only when the account gets activated.
+        if [[ " $* " != *" --no-activate "* ]]; then
+            acct=$(cat "$D/account")
+            echo "$(date '+%F %T'),000 INFO     ___FILE_ONLY___ You are now logged in as [$acct]." >> "$log"
+            echo "You are now logged in as [$acct]." >&2
+        fi
+        ;;
+    hang) exec sleep 599 ;;  # nobody approves the browser; exec so SIGTERM hits sleep
+    *)
+        echo "ERROR: (gcloud.auth.login) There was a problem with web authentication." >&2
+        exit 1 ;;
+    esac
+    ;;
+"auth application-default")
+    running auth.application-default.login "$*"
+    sleep 0.2
+    echo "Credentials saved to file: [$CLOUDSDK_CONFIG/application_default_credentials.json]" >&2
+    ;;
+*)
+    echo "fake-gcloud: unexpected call: $*" >&2
+    exit 2 ;;
+esac

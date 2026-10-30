@@ -1,0 +1,50 @@
+[tasks.build]
+description = "Build GcloudBar.app into ~/Applications (SwiftPM + bundle assembly)"
+run = "packaging/build.sh"
+
+[tasks.app]
+description = "Rebuild and (re)launch GcloudBar.app"
+run = """
+packaging/build.sh
+pkill -f 'MacOS/GcloudBar' || true
+sleep 1
+open ~/Applications/GcloudBar.app
+"""
+
+[tasks.dist]
+description = "Build a shareable universal zip of GcloudBar.app into dist/ (ad-hoc signed unless CODESIGN_IDENTITY is set)"
+run = """
+UNIVERSAL=1 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}" packaging/build.sh dist/GcloudBar.app
+ditto -c -k --keepParent dist/GcloudBar.app dist/GcloudBar.zip
+rm -rf dist/GcloudBar.app
+echo "dist/GcloudBar.zip"
+"""
+
+[tasks.icon]
+description = "Regenerate packaging/GcloudBar.icns from render-icon.swift"
+run = "packaging/make-icns.sh"
+
+[tasks.state]
+description = "Show what GcloudBar has learned (last login, session length, probe history)"
+run = "cat ~/Library/Application\\ Support/GcloudBar/state.json | python3 -m json.tool"
+
+[tasks.test]
+description = "Build, then run the end-to-end suite (real app vs. tests/fake-gcloud, 120x clock)"
+run = """
+packaging/build.sh
+tests/e2e.sh
+"""
+
+[tasks.release]
+description = "Test, tag vX.Y.Z and push it; GitHub Actions builds and publishes the release"
+usage = 'arg "<version>" help="e.g. 1.2.0"'
+run = 'packaging/release.sh "${usage_version}"'
+
+[tasks.release-local]
+description = "Test, build on this Mac and publish it as release vX.Y.Z with gh (no Actions)"
+usage = 'arg "<version>" help="e.g. 1.2.0"'
+run = 'packaging/release.sh --local "${usage_version}"'
+
+[tasks.compat]
+description = "Check that the installed gcloud still has everything GcloudBar relies on"
+run = "swift build -c release -q && .build/release/GcloudBar --compat"

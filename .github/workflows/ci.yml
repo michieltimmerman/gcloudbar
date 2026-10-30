@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build (universal)
+        run: UNIVERSAL=1 packaging/build.sh
+
+      - name: Self-check
+        run: ~/Applications/GcloudBar.app/Contents/MacOS/GcloudBar --status
+
+      # The real app binary against tests/fake-gcloud; needs no gcloud or credentials.
+      - name: End-to-end tests
+        run: tests/e2e.sh
