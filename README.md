@@ -273,7 +273,7 @@ Environment only (development and tests):
 |---|---|
 | `GCLOUDBAR_STATE` | state file location |
 | `GCLOUDBAR_DEBUG=1` | log decisions to stderr |
-| `GCLOUDBAR_BUNDLE_ID`, `CODESIGN_IDENTITY`, `VERSION`, `UNIVERSAL=1` | build-time: bundle id, signing identity, version, universal binary |
+| `GCLOUDBAR_BUNDLE_ID`, `CODESIGN_IDENTITY`, `VERSION`, `UNIVERSAL=1`, `SHARED=1` | build-time: bundle id, signing identity, version, universal binary; `SHARED=1` (dist, releases) refuses any identity but a Developer ID or ad-hoc |
 
 ## Development and tests
 

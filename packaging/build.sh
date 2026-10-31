@@ -10,6 +10,9 @@
 #                         ID / Apple Development identity in the keychain, else ad-hoc.
 #                         A Developer ID gets the hardened runtime and a timestamp, as
 #                         notarization requires.
+#   SHARED=1              the build leaves this Mac (dist, releases): only a Developer
+#                         ID or ad-hoc, never an Apple Development identity, whose
+#                         signature carries the developer's personal Apple ID.
 set -euo pipefail
 
 PKG_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -57,14 +60,22 @@ plutil -replace CFBundleIdentifier -string "$BUNDLE_ID" "$APP/Contents/Info.plis
 plutil -replace CFBundleShortVersionString -string "$VERSION" "$APP/Contents/Info.plist"
 plutil -replace CFBundleVersion -string "$BUILD" "$APP/Contents/Info.plist"
 
-# Notifications work with any signature. macOS grants UNUserNotificationCenter
-# only to a Developer ID build ("UNErrorDomain Code=1: Notifications are not
-# allowed for this application" for ad-hoc and Apple Development alike); other
-# builds post through the deprecated NSUserNotificationCenter instead.
+# Notifications work with any signature: macOS grants UNUserNotificationCenter to
+# ad-hoc and Apple Development builds alike when they run from a normal folder such
+# as ~/Applications, and refuses it under /private/tmp ("UNErrorDomain Code=1:
+# Notifications are not allowed for this application"), where the app falls back
+# to the deprecated NSUserNotificationCenter.
 IDENTITY="${CODESIGN_IDENTITY:-}"
+WANTED='Developer ID Application|Apple Development'
+[ "${SHARED:-}" = 1 ] && WANTED='Developer ID Application'
 if [ -z "$IDENTITY" ]; then
   IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
-    | awk -F'"' '/Developer ID Application|Apple Development/{print $2; exit}')
+    | awk -F'"' -v re="$WANTED" '$0 ~ re {print $2; exit}')
+fi
+if [ "${SHARED:-}" = 1 ] && [ -n "$IDENTITY" ] && [ "$IDENTITY" != "-" ] \
+    && [[ "$IDENTITY" != "Developer ID Application"* ]]; then
+  echo "a shared build is signed with a Developer ID Application identity or ad-hoc, not '$IDENTITY'" >&2
+  exit 1
 fi
 
 if [ -z "$IDENTITY" ] || [ "$IDENTITY" = "-" ]; then

@@ -14,7 +14,7 @@ open ~/Applications/GcloudBar.app
 [tasks.dist]
 description = "Build a shareable universal zip of GcloudBar.app into dist/ (ad-hoc signed unless CODESIGN_IDENTITY is set)"
 run = """
-UNIVERSAL=1 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}" packaging/build.sh dist/GcloudBar.app
+UNIVERSAL=1 SHARED=1 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}" packaging/build.sh dist/GcloudBar.app
 ditto -c -k --keepParent dist/GcloudBar.app dist/GcloudBar.zip
 rm -rf dist/GcloudBar.app
 echo "dist/GcloudBar.zip"

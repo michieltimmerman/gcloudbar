@@ -51,7 +51,7 @@ IDENTITY="${CODESIGN_IDENTITY:-$(security find-identity -v -p codesigning 2> /de
     | awk -F'"' '/Developer ID Application/ {print $2; exit}')}"
 echo "→ universal build ${IDENTITY:+signed by $IDENTITY}"
 rm -rf dist
-VERSION="$VERSION" UNIVERSAL=1 CODESIGN_IDENTITY="${IDENTITY:--}" packaging/build.sh dist/GcloudBar.app
+VERSION="$VERSION" UNIVERSAL=1 SHARED=1 CODESIGN_IDENTITY="${IDENTITY:--}" packaging/build.sh dist/GcloudBar.app
 ditto -c -k --keepParent dist/GcloudBar.app dist/GcloudBar.zip
 (cd dist && shasum -a 256 GcloudBar.zip > GcloudBar.zip.sha256)
 

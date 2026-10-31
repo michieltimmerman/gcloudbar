@@ -25,7 +25,8 @@ identity=$(security find-identity -v -p codesigning 2> /dev/null \
     | awk -F'"' '/Developer ID Application/ {print $2; exit}')
 read -r -p "Signing identity [${identity:-none found}]: " value
 identity="${value:-$identity}"
-[ -n "$identity" ] || { echo "a Developer ID Application identity is needed" >&2; exit 1; }
+[[ "$identity" == "Developer ID Application"* ]] \
+    || { echo "a Developer ID Application identity is needed" >&2; exit 1; }
 printf '%s' "$identity" | put MACOS_SIGNING_IDENTITY
 
 read -r -p "Apple ID (email): " value
@@ -36,4 +37,4 @@ printf '%s' "${value:-$team}" | put APPLE_TEAM_ID
 read -r -s -p "App-specific password: " value; echo
 printf '%s' "$value" | put APPLE_APP_PASSWORD
 
-echo "Done: the next 'mise run release -- X.Y.Z' is signed and notarized."
+echo "Done: the next 'mise run release X.Y.Z' is signed and notarized."

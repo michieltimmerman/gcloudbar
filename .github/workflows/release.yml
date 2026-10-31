@@ -22,6 +22,7 @@ jobs:
   # the tag and so triggers this workflow; stand down when the release exists.
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       exists: ${{ steps.release.outputs.exists }}
     steps:
@@ -37,6 +38,7 @@ jobs:
     needs: check
     if: needs.check.outputs.exists != 'true'
     runs-on: macos-15
+    timeout-minutes: 30
     env:
       HAS_CERT: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
       HAS_NOTARY: ${{ secrets.APPLE_APP_PASSWORD != '' }}
@@ -68,7 +70,7 @@ jobs:
       - name: Build
         env:
           CODESIGN_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
-        run: UNIVERSAL=1 packaging/build.sh dist/GcloudBar.app
+        run: UNIVERSAL=1 SHARED=1 packaging/build.sh dist/GcloudBar.app
 
       - name: Notarize
         if: env.HAS_CERT == 'true' && env.HAS_NOTARY == 'true'

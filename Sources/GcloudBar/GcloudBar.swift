@@ -25,9 +25,10 @@
 // no configuration is rewritten, and it never uses --update-adc (which replaces an
 // impersonated ADC with plain user credentials).
 //
-// Notifications use UNUserNotificationCenter when macOS allows it, which takes a
-// Developer ID signature (ad-hoc and Apple Development builds are refused), else
-// the deprecated NSUserNotificationCenter, which has no such gate.
+// Notifications use UNUserNotificationCenter when macOS allows it, which depends on
+// where the app lives rather than its signature (an app under /private/tmp is
+// refused, ad-hoc or not), else the deprecated NSUserNotificationCenter, which has
+// no such gate.
 import AppKit
 import ServiceManagement
 import SwiftUI
@@ -356,19 +357,28 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     static let shared = Notifier()
 
     private var useNative = false
+    /// The user turned GcloudBar's notifications down in the native prompt: respect
+    /// that rather than reaching them through the deprecated center instead.
+    private var declined = false
 
     func requestAuthorization() {
         guard Bundle.main.bundleIdentifier != nil, appEnv["GCLOUDBAR_NO_BANNERS"] != "1" else { return }
         let center = UNUserNotificationCenter.current()
         center.delegate = self
-        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
-            DispatchQueue.main.async { self.useNative = granted }
+        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+            // An error means macOS refuses the app this route (seen for an app
+            // under /private/tmp, whatever its signature); no error and no grant
+            // means the user said no.
+            DispatchQueue.main.async {
+                self.useNative = granted
+                self.declined = !granted && error == nil
+            }
         }
     }
 
     func post(title: String, body: String, group: String = "gcloudbar") {
         debug("notify: \(title) — \(body)")
-        if appEnv["GCLOUDBAR_NO_BANNERS"] == "1" { return }
+        if appEnv["GCLOUDBAR_NO_BANNERS"] == "1" || declined { return }
         if useNative {
             let content = UNMutableNotificationContent()
             content.title = title
@@ -383,12 +393,13 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         }
         // A bare binary (`swift run`) has no bundle for either center. Title and
         // body travel as arguments, never inside the script text, so gcloud's error
-        // lines can't break (or inject into) the AppleScript.
+        // lines can't break (or inject into) the AppleScript; "--" keeps one that
+        // starts with "-" from being read as an osascript option.
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         proc.arguments = ["-e", "on run argv",
                           "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
-                          "-e", "end run", title, body]
+                          "-e", "end run", "--", title, body]
         try? proc.run()
     }
 
@@ -400,7 +411,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     }
 }
 
-/// The fallback for builds macOS won't give UNUserNotificationCenter. The
+/// The fallback when macOS refuses UNUserNotificationCenter. The
 /// deprecated NSUserNotificationCenter asks for no authorization (terminal-notifier
 /// relies on the same), and its banners still show as GcloudBar, with its icon.
 /// Its deprecation warnings are expected; Swift has no way to silence them here.
