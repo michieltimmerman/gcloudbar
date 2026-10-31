@@ -15,6 +15,11 @@ The login itself can't be automated, since the browser + 2FA step is the point o
 the policy. GcloudBar works out when your session will lapse and opens the login
 for you shortly before. All you do is approve it in the browser.
 
+**[Download the latest release](../../releases/latest)**: macOS 14+, Apple
+silicon and Intel.
+
+<img src="docs/settings.png" alt="GcloudBar Settings window" width="480">
+
 ## Requirements
 
 - macOS 14 or later
@@ -277,8 +282,9 @@ Environment only (development and tests):
 
 ```sh
 mise run app      # build into ~/Applications and (re)launch
-mise run test     # build, then tests/e2e.sh (~2 min)
+mise run test     # build, then tests/e2e.sh (a few minutes)
 mise run state    # what the app has learned
+mise run demo     # the app on demo data (fake gcloud, demo@example.com), for screenshots
 tests/real-smoke.sh [service-account]
 ```
 
@@ -319,12 +325,19 @@ mise run release-local -- 1.2.0   # build here and publish with gh (no Actions)
   a stable link.
 - **Signing and notarization:** the build is signed with a Developer ID and
   notarized, so it opens without the Gatekeeper step, when the repository has
-  these secrets (an Apple Developer Program membership is needed):
+  these secrets:
   - `MACOS_CERTIFICATE_P12`, `MACOS_CERTIFICATE_PASSWORD`, `MACOS_SIGNING_IDENTITY`
   - `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`
 
   Without them, the build is ad-hoc signed and the release notes explain the
-  "Open Anyway" step.
+  "Open Anyway" step. To set them up:
+  1. Join the Apple Developer Program.
+  2. Create a **Developer ID Application** certificate (Xcode → Settings →
+     Accounts → Manage Certificates).
+  3. Export it from Keychain Access as a `.p12` with a password.
+  4. Create an app-specific password at account.apple.com.
+  5. Run `mise run release-secrets`. It asks for each value and passes it
+     straight to `gh secret set`, without writing anything to disk.
 - **`release-local`** signs with a Developer ID from your keychain if you have
   one, and ad-hoc otherwise. It never uses an Apple Development certificate,
   because that would put your personal Apple ID in every download.
@@ -363,3 +376,6 @@ Actions tab if that happens.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+Built by Michiel Timmerman, with [Claude Code](https://claude.com/claude-code)
+as a pair programmer.

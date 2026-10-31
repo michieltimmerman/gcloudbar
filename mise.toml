@@ -48,3 +48,11 @@ run = 'packaging/release.sh --local "${usage_version}"'
 [tasks.compat]
 description = "Check that the installed gcloud still has everything GcloudBar relies on"
 run = "swift build -c release -q && .build/release/GcloudBar --compat"
+
+[tasks.release-secrets]
+description = "Store the Developer ID signing + notarization secrets in the GitHub repo (interactive)"
+run = "packaging/release-secrets.sh"
+
+[tasks.demo]
+description = "Start GcloudBar with demo data (fake gcloud, demo@example.com) for screenshots"
+run = "tests/demo.sh"
