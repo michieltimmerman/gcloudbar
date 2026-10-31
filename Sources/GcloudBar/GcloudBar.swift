@@ -25,8 +25,9 @@
 // no configuration is rewritten, and it never uses --update-adc (which replaces an
 // impersonated ADC with plain user credentials).
 //
-// Notifications use UNUserNotificationCenter when macOS allows it (it refuses
-// ad-hoc signed apps), else terminal-notifier when installed, else osascript.
+// Notifications use UNUserNotificationCenter when macOS allows it, which takes a
+// Developer ID signature (ad-hoc and Apple Development builds are refused), else
+// the deprecated NSUserNotificationCenter, which has no such gate.
 import AppKit
 import ServiceManagement
 import SwiftUI
@@ -355,9 +356,6 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     static let shared = Notifier()
 
     private var useNative = false
-    /// Homebrew's prefix differs between Apple silicon and Intel Macs.
-    private let fallback = ["/opt/homebrew/bin/terminal-notifier", "/usr/local/bin/terminal-notifier"]
-        .first { FileManager.default.isExecutableFile(atPath: $0) }
 
     func requestAuthorization() {
         guard Bundle.main.bundleIdentifier != nil, appEnv["GCLOUDBAR_NO_BANNERS"] != "1" else { return }
@@ -379,18 +377,18 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
                 UNNotificationRequest(identifier: group, content: content, trigger: nil))
             return
         }
-        let proc = Process()
-        if let fallback {
-            proc.executableURL = URL(fileURLWithPath: fallback)
-            proc.arguments = ["-title", title, "-message", body, "-group", group]
-        } else {
-            // Title and body travel as arguments, never inside the script text, so
-            // gcloud's error lines can't break (or inject into) the AppleScript.
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            proc.arguments = ["-e", "on run argv",
-                              "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
-                              "-e", "end run", title, body]
+        if Bundle.main.bundleIdentifier != nil {
+            LegacyNotifier.shared.post(title: title, body: body, group: group)
+            return
         }
+        // A bare binary (`swift run`) has no bundle for either center. Title and
+        // body travel as arguments, never inside the script text, so gcloud's error
+        // lines can't break (or inject into) the AppleScript.
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", "on run argv",
+                          "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
+                          "-e", "end run", title, body]
         try? proc.run()
     }
 
@@ -399,6 +397,32 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
                                withCompletionHandler completion:
                                    @escaping (UNNotificationPresentationOptions) -> Void) {
         completion([.banner, .sound])
+    }
+}
+
+/// The fallback for builds macOS won't give UNUserNotificationCenter. The
+/// deprecated NSUserNotificationCenter asks for no authorization (terminal-notifier
+/// relies on the same), and its banners still show as GcloudBar, with its icon.
+/// Its deprecation warnings are expected; Swift has no way to silence them here.
+final class LegacyNotifier: NSObject, NSUserNotificationCenterDelegate {
+    static let shared = LegacyNotifier()
+
+    func post(title: String, body: String, group: String) {
+        let center = NSUserNotificationCenter.default
+        center.delegate = self
+        let note = NSUserNotification()
+        note.title = title
+        note.informativeText = body
+        // As with UNNotificationRequest's identifier, a newer notification
+        // replaces the one still showing from the same group.
+        note.identifier = group
+        center.deliver(note)
+    }
+
+    /// Show banners even while GcloudBar is the active app (its Settings window).
+    func userNotificationCenter(_ center: NSUserNotificationCenter,
+                                shouldPresent notification: NSUserNotification) -> Bool {
+        true
     }
 }
 

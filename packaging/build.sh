@@ -57,10 +57,10 @@ plutil -replace CFBundleIdentifier -string "$BUNDLE_ID" "$APP/Contents/Info.plis
 plutil -replace CFBundleShortVersionString -string "$VERSION" "$APP/Contents/Info.plist"
 plutil -replace CFBundleVersion -string "$BUILD" "$APP/Contents/Info.plist"
 
-# macOS refuses UNUserNotificationCenter for ad-hoc signed apps
-# ("UNErrorDomain Code=1: Notifications are not allowed for this application"),
-# so local builds sign with a real identity when the keychain has one; ad-hoc
-# still runs, it just falls back to terminal-notifier for alerts.
+# Notifications work with any signature. macOS grants UNUserNotificationCenter
+# only to a Developer ID build ("UNErrorDomain Code=1: Notifications are not
+# allowed for this application" for ad-hoc and Apple Development alike); other
+# builds post through the deprecated NSUserNotificationCenter instead.
 IDENTITY="${CODESIGN_IDENTITY:-}"
 if [ -z "$IDENTITY" ]; then
   IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
@@ -69,7 +69,7 @@ fi
 
 if [ -z "$IDENTITY" ] || [ "$IDENTITY" = "-" ]; then
   codesign --force --sign - "$APP"
-  echo "ad-hoc signed — native notifications unavailable, will use terminal-notifier"
+  echo "ad-hoc signed"
 elif [[ "$IDENTITY" == "Developer ID Application"* ]]; then
   # A release build: failing to sign must fail the build, not ship unsigned.
   codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"

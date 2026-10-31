@@ -33,9 +33,6 @@ silicon and Intel.
   Point it elsewhere with `GCLOUDBAR_GCLOUD`.
 - A Python ≥ 3.10 that gcloud can load with. Finding it is automatic, see
   [Finding gcloud and Python](#finding-gcloud-and-python).
-- Optional: [`terminal-notifier`](https://github.com/julienXX/terminal-notifier)
-  (`brew install terminal-notifier`) for proper notifications; without it they
-  go through `osascript`.
 - Optional: [mise](https://mise.jdx.dev) for the task shortcuts below.
 
 ## Install
