@@ -5,7 +5,8 @@
 // admin picks it; 16h is common), with "Reauthentication failed. cannot prompt
 // during non-interactive execution". Nothing can renew that unattended — the
 // browser + 2FA step is the point — so the app's job is to know when it lapses and
-// put the login in front of you first.
+// tell you first. It never opens the browser by itself: a notification says how
+// long the login has left (or that it lapsed), and clicking it starts the login.
 //
 // Expiry is not stored anywhere: a fresh login keeps no RAPT and gcloud never
 // records a session deadline, so expiry = last login + session length.
@@ -13,8 +14,9 @@
 //     for a completed `gcloud auth login` you ran yourself.
 //   - Session length: the guess from the menu, narrowed by probes. A probe is a
 //     forced refresh (`print-access-token --scopes=…` skips the token cache and
-//     leaves it untouched) every 10 minutes; "still worked at age A" and "lapsed
-//     by age B" bound the real length.
+//     leaves it untouched), run when gcloud is used, on a schedule and when you
+//     log in to or unlock the Mac (each switchable); "still worked at age A" and
+//     "lapsed by age B" bound the real length.
 //   - Without such a policy refresh tokens never lapse, so nothing is predicted
 //     until a lapse has actually been seen once; until then the app only reacts.
 //
@@ -38,14 +40,14 @@ let appEnv = ProcessInfo.processInfo.environment
 /// Test hook (tests/e2e.sh): GCLOUDBAR_TIME_SCALE=120 runs every interval 120x faster.
 let timeScale = max(1, Double(appEnv["GCLOUDBAR_TIME_SCALE"] ?? "") ?? 1)
 let tickEvery: TimeInterval = 30 / timeScale
-let probeEvery: TimeInterval = 600 / timeScale
 /// `gcloud auth login` waits on its localhost redirect with no timeout of its own.
 let loginTimeout: TimeInterval = 300 / timeScale
-/// After an abandoned or failed automatic login, wait this long (or for the next
-/// wake/unlock) before opening another browser tab.
-let retryAfter: TimeInterval = 30 * 60 / timeScale
-/// Only start an automatic login when someone is at the keyboard.
-let idleLimit: TimeInterval = 120
+/// gcloud in use checks at most this often: a tool asking for a token every few
+/// seconds needs no probe each time.
+let useCheckGap: TimeInterval = 60 / timeScale
+/// While the login has lapsed, gcloud in use repeats the lapse notification at
+/// most this often.
+let remindEvery: TimeInterval = 10 * 60 / timeScale
 let debugOn = appEnv["GCLOUDBAR_DEBUG"] == "1"
 
 func debug(_ msg: @autoclosure () -> String) {
@@ -353,6 +355,31 @@ struct LoginScanner {
 
 // MARK: - Notifications
 
+/// What clicking a notification does.
+enum NoteAction: String {
+    /// Start `gcloud auth login` (opens the browser).
+    case login
+    case settings
+    /// Open the newer release's page.
+    case update
+
+    static let key = "gcloudbar-action"
+
+    func perform() {
+        debug("notification clicked: \(rawValue)")
+        switch self {
+        case .login: Monitor.shared.login()
+        case .settings: SettingsWindow.shared.show(tab: "general")
+        case .update: Monitor.shared.availableUpdate.map { Updates.open($0.page) }
+        }
+    }
+
+    init?(userInfo: [AnyHashable: Any]?) {
+        guard let raw = userInfo?[Self.key] as? String else { return nil }
+        self.init(rawValue: raw)
+    }
+}
+
 final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     static let shared = Notifier()
 
@@ -360,6 +387,8 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     /// The user turned GcloudBar's notifications down in the native prompt: respect
     /// that rather than reaching them through the deprecated center instead.
     private var declined = false
+    /// Test hook: the inbox's "click" performs the last notification's action.
+    private(set) var lastAction: NoteAction?
 
     func requestAuthorization() {
         guard Bundle.main.bundleIdentifier != nil, appEnv["GCLOUDBAR_NO_BANNERS"] != "1" else { return }
@@ -376,19 +405,22 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
-    func post(title: String, body: String, group: String = "gcloudbar") {
-        debug("notify: \(title) — \(body)")
+    func post(title: String, body: String, group: String = "gcloudbar", action: NoteAction? = nil) {
+        debug("notify: \(title) — \(body)" + (action.map { " [click: \($0.rawValue)]" } ?? ""))
+        lastAction = action
         if appEnv["GCLOUDBAR_NO_BANNERS"] == "1" || declined { return }
+        let info: [AnyHashable: Any] = action.map { [NoteAction.key: $0.rawValue] } ?? [:]
         if useNative {
             let content = UNMutableNotificationContent()
             content.title = title
             content.body = body
+            content.userInfo = info
             UNUserNotificationCenter.current().add(
                 UNNotificationRequest(identifier: group, content: content, trigger: nil))
             return
         }
         if Bundle.main.bundleIdentifier != nil {
-            LegacyNotifier.shared.post(title: title, body: body, group: group)
+            LegacyNotifier.shared.post(title: title, body: body, group: group, info: info)
             return
         }
         // A bare binary (`swift run`) has no bundle for either center. Title and
@@ -407,7 +439,19 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
                                willPresent notification: UNNotification,
                                withCompletionHandler completion:
                                    @escaping (UNNotificationPresentationOptions) -> Void) {
-        completion([.banner, .sound])
+        completion([.banner, .sound, .list])
+    }
+
+    /// A click on the banner, or on it in Notification Center.
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completion: @escaping () -> Void) {
+        let action = response.actionIdentifier == UNNotificationDefaultActionIdentifier
+            ? NoteAction(userInfo: response.notification.request.content.userInfo) : nil
+        DispatchQueue.main.async {
+            action?.perform()
+            completion()
+        }
     }
 }
 
@@ -418,12 +462,13 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
 final class LegacyNotifier: NSObject, NSUserNotificationCenterDelegate {
     static let shared = LegacyNotifier()
 
-    func post(title: String, body: String, group: String) {
+    func post(title: String, body: String, group: String, info: [AnyHashable: Any]) {
         let center = NSUserNotificationCenter.default
         center.delegate = self
         let note = NSUserNotification()
         note.title = title
         note.informativeText = body
+        note.userInfo = info as? [String: Any]
         // As with UNNotificationRequest's identifier, a newer notification
         // replaces the one still showing from the same group.
         note.identifier = group
@@ -434,6 +479,12 @@ final class LegacyNotifier: NSObject, NSUserNotificationCenterDelegate {
     func userNotificationCenter(_ center: NSUserNotificationCenter,
                                 shouldPresent notification: NSUserNotification) -> Bool {
         true
+    }
+
+    func userNotificationCenter(_ center: NSUserNotificationCenter,
+                                didActivate notification: NSUserNotification) {
+        guard let action = NoteAction(userInfo: notification.userInfo) else { return }
+        DispatchQueue.main.async { action.perform() }
     }
 }
 
@@ -448,30 +499,49 @@ struct State: Codable {
     /// Youngest session age at which a probe hit the reauth wall.
     var shortestExpired: TimeInterval?
     var sessionHours: Double = 16
-    var autoLogin = true
     var renewADC = false
-    var notify = true
     /// The Python gcloud last loaded with (Toolchain.resolve tries it first).
     var python: String?
     /// Open login pages in LoginBrowser (Chrome) when it is installed.
     var useLoginBrowser = true
-    /// Renew this long before the estimated expiry. Generous by default: an agent
-    /// can keep using the session long after you've walked away, and only you can
-    /// approve the renewal.
-    var renewAheadMinutes: Double = 60
+    /// Notify when this share of the session is left. A share rather than a fixed
+    /// time, so the heads-up always falls inside the session, however short the
+    /// learned length turns out to be.
+    var warnAheadPercent: Double = 10
+    /// Lapse detection: when gcloud is used (its logs), on a schedule (0 = off),
+    /// and when you log in to, unlock or wake the Mac.
+    var checkOnUse = true
+    var checkEveryMinutes: Double = 10
+    var checkOnUnlock = true
+    /// Look for a newer GcloudBar once a day; what was found, and the version
+    /// already announced.
+    var checkUpdates = true
+    var lastUpdateCheck: Date?
+    var latestVersion: String?
+    var latestPage: String?
+    var updateNotified: String?
 
     /// gcloud versions already notified about a compatibility problem.
     var compatNotified: String?
 
     // What the app acts on: a command-line argument for this run wins over the
     // saved setting (which the Settings window edits). Never saved.
-    var renewsAutomatically: Bool { overrides.autoRenew ?? autoLogin }
-    var notifies: Bool { overrides.notifications ?? notify }
     var renewsADC: Bool { overrides.renewADC ?? renewADC }
     var opensLoginBrowser: Bool {
         overrides.loginBrowser.map { $0 != "default" } ?? useLoginBrowser
     }
-    var leadTime: TimeInterval { (overrides.renewAheadMinutes ?? renewAheadMinutes) * 60 / timeScale }
+    var warnsAheadPercent: Double { overrides.warnAheadPercent ?? warnAheadPercent }
+    var checksOnUse: Bool { overrides.checkOnUse ?? checkOnUse }
+    var checksOnUnlock: Bool { overrides.checkOnUnlock ?? checkOnUnlock }
+    var checksUpdates: Bool { overrides.checkUpdates ?? checkUpdates }
+    /// nil: no scheduled checks.
+    var checkInterval: TimeInterval? {
+        let m = overrides.checkEveryMinutes ?? checkEveryMinutes
+        return m > 0 ? m * 60 / timeScale : nil
+    }
+    /// The notice window: the configured share of the session, so always shorter
+    /// than the session itself.
+    var leadTime: TimeInterval { sessionLength * min(max(warnsAheadPercent, 1), 50) / 100 }
 
     init() {}
 
@@ -485,12 +555,18 @@ struct State: Codable {
         longestValid = try c.decodeIfPresent(TimeInterval.self, forKey: .longestValid) ?? d.longestValid
         shortestExpired = try c.decodeIfPresent(TimeInterval.self, forKey: .shortestExpired)
         sessionHours = try c.decodeIfPresent(Double.self, forKey: .sessionHours) ?? d.sessionHours
-        autoLogin = try c.decodeIfPresent(Bool.self, forKey: .autoLogin) ?? d.autoLogin
         renewADC = try c.decodeIfPresent(Bool.self, forKey: .renewADC) ?? d.renewADC
-        notify = try c.decodeIfPresent(Bool.self, forKey: .notify) ?? d.notify
         python = try c.decodeIfPresent(String.self, forKey: .python)
         useLoginBrowser = try c.decodeIfPresent(Bool.self, forKey: .useLoginBrowser) ?? d.useLoginBrowser
-        renewAheadMinutes = try c.decodeIfPresent(Double.self, forKey: .renewAheadMinutes) ?? d.renewAheadMinutes
+        warnAheadPercent = try c.decodeIfPresent(Double.self, forKey: .warnAheadPercent) ?? d.warnAheadPercent
+        checkOnUse = try c.decodeIfPresent(Bool.self, forKey: .checkOnUse) ?? d.checkOnUse
+        checkEveryMinutes = try c.decodeIfPresent(Double.self, forKey: .checkEveryMinutes) ?? d.checkEveryMinutes
+        checkOnUnlock = try c.decodeIfPresent(Bool.self, forKey: .checkOnUnlock) ?? d.checkOnUnlock
+        checkUpdates = try c.decodeIfPresent(Bool.self, forKey: .checkUpdates) ?? d.checkUpdates
+        lastUpdateCheck = try c.decodeIfPresent(Date.self, forKey: .lastUpdateCheck)
+        latestVersion = try c.decodeIfPresent(String.self, forKey: .latestVersion)
+        latestPage = try c.decodeIfPresent(String.self, forKey: .latestPage)
+        updateNotified = try c.decodeIfPresent(String.self, forKey: .updateNotified)
         compatNotified = try c.decodeIfPresent(String.self, forKey: .compatNotified)
     }
 
@@ -617,15 +693,6 @@ func adcImpersonation() -> (target: String, chain: String)? {
     return (target, (delegates + [target]).joined(separator: ","))
 }
 
-func userPresent() -> Bool {
-    if appEnv["GCLOUDBAR_ASSUME_PRESENT"] == "1" { return true }
-    let session = CGSessionCopyCurrentDictionary() as? [String: Any]
-    let locked = session?["CGSSessionScreenIsLocked"] as? Bool ?? false
-    let idle = CGEventSource.secondsSinceLastEventType(
-        .combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
-    return !locked && idle < idleLimit
-}
-
 // MARK: - Monitor
 
 enum Health: Equatable {
@@ -654,6 +721,9 @@ final class Monitor: ObservableObject {
     @Published var compat: Compat.Report?
     /// Redrawn by the tick so countdowns move between probes.
     @Published var now = Date()
+    /// The last update check's outcome, for Settings.
+    @Published var updateStatus: String?
+    private var checkingUpdates = false
 
     private var toolchain: Toolchain?
     private var locating = false
@@ -666,13 +736,16 @@ final class Monitor: ObservableObject {
     /// "Log in now" clicked while gcloud is still being located (vetting Pythons
     /// takes a few seconds after launch); it runs as soon as the toolchain is known.
     private var loginQueued = false
-    private var nextAutoAttempt: Date?
     /// When a probe first hit the reauth wall in the current lapse.
     private var lapsedAt: Date?
-    /// The login a heads-up was already sent for, and whether the lapse was announced.
+    /// The login a heads-up was already sent for, and when the lapse was last announced.
     private var warnedSoonFor: Date?
-    private var warnedLapse = false
+    private var announcedLapse: Date?
+    /// The check under way was started by gcloud being used: a lapse it finds is
+    /// announced again even when it was already announced.
+    private var checkForUse = false
     private var timer: Timer?
+    private lazy var usage = UsageWatcher { [weak self] command in self?.gcloudUsed(command) }
 
     private var sigterm: DispatchSourceSignal?
 
@@ -682,10 +755,8 @@ final class Monitor: ObservableObject {
         ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) {
             [weak self] _ in self?.cameBack()
         }
-        // A display wake is not a return to the Mac: check, but keep the back-off,
-        // or every mouse nudge would reopen an ignored login.
         ws.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) {
-            [weak self] _ in self?.check()
+            [weak self] _ in self?.cameBack()
         }
         DistributedNotificationCenter.default().addObserver(
             forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main
@@ -707,8 +778,29 @@ final class Monitor: ObservableObject {
             launchAtLoginNote = "Move GcloudBar to Applications to enable Launch at login"
         }
         locate()
+        watchUsage()
         timer = Timer.scheduledTimer(withTimeInterval: tickEvery, repeats: true) { [weak self] _ in
             self?.tick()
+        }
+    }
+
+    /// (Re)start or stop lapse detection on use: at launch, and when Settings
+    /// changes the switch or the config folder.
+    func watchUsage() {
+        if state.checksOnUse { usage.start(configDir: gcloudConfigDir) } else { usage.stop() }
+    }
+
+    /// gcloud ran (not GcloudBar's own calls). Check the login unless a check just
+    /// answered; a lapse found this way is announced again, as you're trying to use it.
+    private func gcloudUsed(_ command: String) {
+        guard state.checksOnUse else { return }
+        now = Date()
+        debug("gcloud used: \(command)")
+        if !probing, !loggingIn, lastCheck.map({ now.timeIntervalSince($0) >= useCheckGap }) ?? true {
+            checkForUse = true
+            check()
+        } else if !loggingIn {
+            notifyIfDue(reminder: true)
         }
     }
 
@@ -754,7 +846,7 @@ final class Monitor: ObservableObject {
                     return
                 }
                 debug("compat: \(report.summary)")
-                if let first = report.failures.first, self.state.notifies,
+                if let first = report.failures.first,
                    self.state.compatNotified != report.version {
                     self.state.compatNotified = report.version
                     Notifier.shared.post(title: "gcloud \(report.version) changed something GcloudBar relies on",
@@ -768,6 +860,7 @@ final class Monitor: ObservableObject {
     /// Settings moved the gcloud config folder: other logs, maybe another account.
     func configFolderChanged() {
         scanner = LoginScanner()
+        watchUsage()
         locate()
     }
 
@@ -777,14 +870,14 @@ final class Monitor: ObservableObject {
         state.shortestExpired = nil
         lapsedAt = nil
         warnedSoonFor = nil
+        announcedLapse = nil
     }
 
-    /// System wake or unlock: a lapse that happened overnight is the usual case, and
-    /// a declined login earlier shouldn't block the fresh attempt.
+    /// Mac login, unlock or wake: a lapse that happened overnight is the usual case.
     private func cameBack() {
-        nextAutoAttempt = nil
         // Installed gcloud while the Mac slept, say.
         if toolchainMissing { locate() }
+        guard state.checksOnUnlock else { return }
         // The network needs a moment after wake.
         DispatchQueue.main.asyncAfter(deadline: .now() + 10 / timeScale) { self.check() }
     }
@@ -793,11 +886,55 @@ final class Monitor: ObservableObject {
         now = Date()
         readInbox()
         scanLogs()
-        if !probing, !loggingIn, (lastCheck.map { now.timeIntervalSince($0) >= probeEvery } ?? true) {
+        if let every = state.checkInterval, !probing, !loggingIn,
+           lastCheck.map({ now.timeIntervalSince($0) >= every }) ?? true {
             check()
         }
-        maybeRenew()
-        warnIfManual()
+        // The heads-up runs on the clock, so it comes without any check.
+        notifyIfDue()
+        if state.checksUpdates, state.lastUpdateCheck.map({ now.timeIntervalSince($0) >= updateCheckEvery }) ?? true {
+            checkForUpdates()
+        }
+    }
+
+    /// A newer release than this build, from the last update check.
+    var availableUpdate: Release? {
+        guard let v = state.latestVersion, Updates.isNewer(v, than: Updates.currentVersion),
+              let page = state.latestPage.flatMap(URL.init(string:)) else { return nil }
+        return Release(version: v, page: page)
+    }
+
+    /// Daily, and from Settings → Check now. A new version is announced once.
+    func checkForUpdates() {
+        guard !checkingUpdates else { return }
+        checkingUpdates = true
+        // Stamped up front: a failing check waits for the next day too.
+        state.lastUpdateCheck = Date()
+        updateStatus = "Checking…"
+        Updates.fetchLatest { [weak self] result in
+            guard let self else { return }
+            self.checkingUpdates = false
+            switch result {
+            case .failure(let e):
+                debug("update check failed: \(e.localizedDescription)")
+                self.updateStatus = "Check failed: \(e.localizedDescription)"
+            case .success(let r):
+                debug("update check: latest \(r.version), running \(Updates.currentVersion)")
+                self.state.latestVersion = r.version
+                self.state.latestPage = r.page.absoluteString
+                guard let u = self.availableUpdate else {
+                    self.updateStatus = "Up to date (\(Updates.currentVersion))"
+                    return
+                }
+                self.updateStatus = "GcloudBar \(u.version) is available"
+                if self.state.updateNotified != u.version {
+                    self.state.updateNotified = u.version
+                    Notifier.shared.post(title: "GcloudBar \(u.version) is available",
+                                         body: "You have \(Updates.currentVersion). Click to open the release page.",
+                                         group: "gcloudbar-update", action: .update)
+                }
+            }
+        }
     }
 
     /// Test hook: GCLOUDBAR_TEST_INBOX names a file of menu actions (login, cancel,
@@ -815,6 +952,9 @@ final class Monitor: ObservableObject {
             case "check": check()
             case "settings": SettingsWindow.shared.show(tab: "general")
             case "settings gcloud": SettingsWindow.shared.show(tab: "gcloud")
+            case "click": Notifier.shared.lastAction?.perform()
+            case "unlock": cameBack()
+            case "check updates": checkForUpdates()
             default: break
             }
         }
@@ -902,48 +1042,51 @@ final class Monitor: ObservableObject {
             health = .failed(why)
         }
         // Said once per streak: half an hour without an answer while it matters.
-        if failedChecks == 3, state.notifies, case .failed(let why) = health {
+        if failedChecks == 3, case .failed(let why) = health {
             Notifier.shared.post(title: "GcloudBar can't check your gcloud login",
                                  body: why, group: "gcloudbar-failing")
         }
-        maybeRenew()
-        warnIfManual()
+        let forUse = checkForUse
+        checkForUse = false
+        notifyIfDue(reminder: forUse)
     }
 
-    private var renewDue: Bool {
+    /// The app never opens the browser by itself; it notifies, and a click on the
+    /// notification starts the login. Two notices: when the configured share of the
+    /// session is left (once per login), and when a lapse is found (once per lapse,
+    /// and again — at most every `remindEvery` — when gcloud is used meanwhile).
+    private func notifyIfDue(reminder: Bool = false) {
+        guard !loggingIn else { return }
         switch health {
-        case .expired, .revoked: return true
-        case .valid: return state.expiry.map { now >= $0.addingTimeInterval(-state.leadTime) } ?? false
-        default: return false
-        }
-    }
-
-    private func maybeRenew() {
-        guard state.renewsAutomatically, !loggingIn, toolchain != nil, renewDue,
-              nextAutoAttempt.map({ now >= $0 }) ?? true, userPresent() else { return }
-        login(auto: true)
-    }
-
-    /// With automatic renewal off, a heads-up before the lapse and a note at it.
-    private func warnIfManual() {
-        if health == .valid { warnedLapse = false }
-        guard !state.renewsAutomatically, state.notifies else { return }
-        if health == .expired || health == .revoked, !warnedLapse {
-            warnedLapse = true
-            Notifier.shared.post(title: "gcloud login lapsed",
-                                 body: "Log in again from the 🔑 menu.")
-        } else if health == .valid, warnedSoonFor != state.lastLogin,
-                  let e = state.expiry, now >= e.addingTimeInterval(-state.leadTime) {
+        case .expired, .revoked:
+            if let last = announcedLapse, !reminder || now.timeIntervalSince(last) < remindEvery { return }
+            announcedLapse = now
+            let since = state.lastLogin.map { " (logged in \(clock($0)))" } ?? ""
+            Notifier.shared.post(
+                title: "gcloud login lapsed",
+                body: (health == .revoked ? "The credentials were revoked." : "The session has ended\(since).")
+                    + " Click to log in again.",
+                group: "gcloudbar-login", action: .login)
+        case .valid:
+            announcedLapse = nil
+            guard warnedSoonFor != state.lastLogin, let e = state.expiry,
+                  now >= e.addingTimeInterval(-state.leadTime) else { return }
             warnedSoonFor = state.lastLogin
-            Notifier.shared.post(title: "gcloud login lapses at ~\(clock(e))",
-                                 body: "Log in from the 🔑 menu to restart the \(hms(state.sessionLength)) clock.")
+            let left = e.timeIntervalSince(now)
+            Notifier.shared.post(
+                title: left > 0 ? "gcloud login lapses in \(hms(left))" : "gcloud login is about to lapse",
+                body: "Expected ~\(clock(e)). Click to log in again and restart the "
+                    + "\(hms(state.sessionLength)) session.",
+                group: "gcloudbar-login", action: .login)
+        default:
+            break
         }
     }
 
-    func login(auto: Bool = false) {
+    func login() {
         guard !loggingIn else { return }
         guard let tc = toolchain else {
-            if !toolchainMissing, !auto {
+            if !toolchainMissing {
                 loginQueued = true
                 debug("login queued until gcloud is located")
             }
@@ -951,14 +1094,6 @@ final class Monitor: ObservableObject {
         }
         loggingIn = true
         loginCancelled = false
-        if state.notifies {
-            var when = "starting a fresh session"
-            if health == .expired || health == .revoked { when = "it has lapsed" }
-            else if health == .valid, let e = state.expiry { when = "it lapses at ~\(clock(e))" }
-            Notifier.shared.post(title: auto ? "Renewing gcloud login" : "gcloud login",
-                                 body: "Approve it in your browser — \(when).",
-                                 group: "gcloudbar-login")
-        }
         let known = state.account
         let adc = state.renewsADC
         let browser = LoginBrowser.env(enabled: state.opensLoginBrowser)
@@ -1008,24 +1143,21 @@ final class Monitor: ObservableObject {
             state.lastLogin = loggedInAt
             health = .valid
             lapsedAt = nil
-            nextAutoAttempt = nil
-            if state.notifies {
-                // No expiry to quote until a lapse has been seen; still say it worked.
-                let until = state.expiry.map { "Good until ~\(clock($0))." } ?? "Session restarted."
-                let adcNote = adc.map { $0.ok ? " ADC renewed too." : " ADC renewal did not finish." } ?? ""
-                Notifier.shared.post(title: "gcloud login renewed", body: until + adcNote,
-                                     group: "gcloudbar-login")
-            }
-        } else {
-            nextAutoAttempt = Date().addingTimeInterval(retryAfter)
-            if state.notifies, !loginCancelled {
-                let why = r.timedOut ? "No browser approval within \(hms(loginTimeout))."
-                    : r.output.split(separator: "\n").first { $0.hasPrefix("ERROR:") }
-                        .map(String.init) ?? "gcloud exited with \(r.status)."
-                Notifier.shared.post(title: "gcloud login not completed",
-                                     body: "\(why) Next try in \(hms(retryAfter)), or when you unlock or wake the Mac.",
-                                     group: "gcloudbar-login")
-            }
+            announcedLapse = nil
+            // No expiry to quote until a lapse has been seen; still say it worked.
+            let until = state.expiry.map { "Lapses ~\(clock($0)) (in \(hms($0.timeIntervalSince(loggedInAt))))." }
+                ?? "No session limit seen yet, so no lapse to predict."
+            let adcNote = adc.map { $0.ok ? " ADC renewed too." : " ADC renewal did not finish." } ?? ""
+            Notifier.shared.post(title: "gcloud login renewed",
+                                 body: until + adcNote + " Click for settings.",
+                                 group: "gcloudbar-login", action: .settings)
+        } else if !loginCancelled {
+            let why = r.timedOut ? "No browser approval within \(hms(loginTimeout))."
+                : r.output.split(separator: "\n").first { $0.hasPrefix("ERROR:") }
+                    .map(String.init) ?? "gcloud exited with \(r.status)."
+            Notifier.shared.post(title: "gcloud login not completed",
+                                 body: "\(why) Click to try again.",
+                                 group: "gcloudbar-login", action: .login)
         }
         check()
     }
@@ -1176,6 +1308,9 @@ struct GcloudBarApp: App {
             }
             Button("Check now") { monitor.check() }
             if let note = monitor.launchAtLoginNote { Text(note) }
+            if let u = monitor.availableUpdate {
+                Button("GcloudBar \(u.version) is available…") { Updates.open(u.page) }
+            }
             if let c = monitor.compat, !c.failures.isEmpty {
                 Text("⚠︎ gcloud \(c.version) changed things GcloudBar relies on — see Settings")
             }

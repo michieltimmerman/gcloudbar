@@ -1,5 +1,5 @@
 // Command-line arguments. Every setting in the Settings window can also be given
-// for one run — `open -a GcloudBar --args --renew-ahead 2h`, or the binary itself
+// for one run — `open -a GcloudBar --args --warn-ahead 20`, or the binary itself
 // — and an argument wins over the environment, which wins over Settings. Arguments
 // are never saved: for a lasting change, use Settings.
 import Foundation
@@ -11,11 +11,14 @@ struct Overrides {
     var gcloudConfig: String?
     /// A bundle id, or "default" for the default browser.
     var loginBrowser: String?
-    var autoRenew: Bool?
-    var renewAheadMinutes: Double?
+    var warnAheadPercent: Double?
+    var checkOnUse: Bool?
+    /// 0: no scheduled checks.
+    var checkEveryMinutes: Double?
+    var checkOnUnlock: Bool?
+    var checkUpdates: Bool?
     var sessionHours: Double?
     var renewADC: Bool?
-    var notifications: Bool?
 
     /// The path and browser settings, by their `setting()` key.
     func value(forSettingKey key: String) -> String? {
@@ -53,11 +56,13 @@ struct Arguments {
         ("--python", "PATH", "Python for gcloud"),
         ("--gcloud-config", "DIR", "gcloud config folder (as CLOUDSDK_CONFIG)"),
         ("--login-browser", "ID|default", "browser for login pages, by bundle id"),
-        ("--auto-renew", "on|off", "renew automatically"),
-        ("--renew-ahead", "DURATION", "renew this long before expiry, e.g. 30m, 2h"),
+        ("--warn-ahead", "PERCENT", "notify when this share of the session is left, e.g. 10"),
+        ("--check-on-use", "on|off", "check the login when gcloud is used"),
+        ("--check-every", "DURATION|off", "check the login on a schedule, e.g. 10m"),
+        ("--check-on-unlock", "on|off", "check when you log in to, unlock or wake the Mac"),
+        ("--check-updates", "on|off", "look for a newer GcloudBar once a day"),
         ("--session-length", "DURATION", "session length until learned, e.g. 16h"),
         ("--renew-adc", "on|off", "also renew Application Default Credentials"),
-        ("--notifications", "on|off", "show notifications"),
     ]
 
     static let usage: String = {
@@ -122,11 +127,15 @@ struct Arguments {
             case "--python": a.overrides.python = try path(value(), arg)
             case "--gcloud-config": a.overrides.gcloudConfig = try path(value(), arg)
             case "--login-browser": a.overrides.loginBrowser = try value()
-            case "--auto-renew": a.overrides.autoRenew = try bool(value(), arg)
-            case "--renew-ahead": a.overrides.renewAheadMinutes = try minutes(value(), arg)
+            case "--warn-ahead": a.overrides.warnAheadPercent = try percent(value(), arg)
+            case "--check-on-use": a.overrides.checkOnUse = try bool(value(), arg)
+            case "--check-every":
+                let v = try value()
+                a.overrides.checkEveryMinutes = v.lowercased() == "off" ? 0 : try minutes(v, arg)
+            case "--check-on-unlock": a.overrides.checkOnUnlock = try bool(value(), arg)
+            case "--check-updates": a.overrides.checkUpdates = try bool(value(), arg)
             case "--session-length": a.overrides.sessionHours = try minutes(value(), arg) / 60
             case "--renew-adc": a.overrides.renewADC = try bool(value(), arg)
-            case "--notifications": a.overrides.notifications = try bool(value(), arg)
             default: throw Invalid(message: "unknown option \(arg)")
             }
         }
@@ -147,6 +156,15 @@ struct Arguments {
         case "off", "false", "no", "0": return false
         default: throw Invalid(message: "\(flag) takes on or off, not \(v)")
         }
+    }
+
+    /// "10" or "10%" → 10; 1 to 50.
+    private static func percent(_ v: String, _ flag: String) throws -> Double {
+        let n = v.hasSuffix("%") ? String(v.dropLast()) : v
+        guard let p = Double(n), p >= 1, p <= 50 else {
+            throw Invalid(message: "\(flag) takes a percentage from 1 to 50, not \(v)")
+        }
+        return p
     }
 
     /// "90m", "2h", "1h30m" → minutes.

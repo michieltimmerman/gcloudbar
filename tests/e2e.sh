@@ -75,15 +75,28 @@ plant_login() { # plant_login <seconds ago> [account]
     PLANTED=$(date -u -v-"$1"S +%Y-%m-%dT%H:%M:%SZ)
 }
 
+# plant_use <command> [args]: another tool's gcloud run, as its log appears.
+plant_use() {
+    local f
+    f="$T/cfg/logs/$(date +%Y.%m.%d)/$(date +%H.%M.%S).$RANDOM.log"
+    mkdir -p "$(dirname "$f")"
+    echo "$(date '+%F %T'),000 DEBUG    root   Running [gcloud.$1] with arguments: [${2:-}]" > "$f"
+}
+probes() { calls "print-access-token"; }
+probes_above() { test "$(probes)" -gt "$1"; }
+notes() { local n; n=$(grep -c -- "notify: $1" "$T/app.log" 2>/dev/null); echo "${n:-0}"; }
+notes_above() { test "$(notes "$1")" -gt "$2"; }
+
 # exec: `start` backgrounds this function, so without it $PID would be a subshell
 # and `kill $PID` would leave the app running.
 run_app() {
     exec env -i HOME="$HOME" USER="$USER" TMPDIR="${TMPDIR:-/tmp}" PATH=/usr/bin:/bin \
         GCLOUDBAR_GCLOUD="${GCLOUD:-$HERE/fake-gcloud}" CLOUDSDK_PYTHON="${PY:-/usr/bin/true}" \
         CLOUDSDK_CONFIG="$T/cfg" CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT="$AGENT_SA" \
-        GCLOUDBAR_STATE="$T/state.json" GCLOUDBAR_TIME_SCALE=120 GCLOUDBAR_ASSUME_PRESENT=1 \
+        GCLOUDBAR_STATE="$T/state.json" GCLOUDBAR_TIME_SCALE=120 \
         GCLOUDBAR_NO_BANNERS=1 GCLOUDBAR_DEBUG=1 GCLOUDBAR_TEST_INBOX="$T/inbox" FAKE_DIR="$T" \
-        GCLOUDBAR_LOGIN_BROWSER="${LOGIN_BROWSER:-$PRESENT_BROWSER}" \
+        GCLOUDBAR_LOGIN_BROWSER="${LOGIN_BROWSER:-$PRESENT_BROWSER}" GCLOUDBAR_OPEN_DRY_RUN=1 \
+        GCLOUDBAR_UPDATE_URL="${UPDATE_URL:-file://$T/no-such-release.json}" \
         "$APP_BIN" "$@"
 }
 # The login-browser logic needs an app that is installed everywhere; Safari is.
@@ -141,7 +154,7 @@ expect "runs nothing but the local \`config get account\`" not grep -qv '^config
 rm -rf "$T"
 
 scenario "skips a Python gcloud can't load with, keeps the one that works" \
-    '{"autoLogin": false, "notify": true, "python": "/usr/bin/true"}'
+    '{"python": "/usr/bin/true"}'
 PY=/bad/python start
 eventually 5 "rejects the inherited CLOUDSDK_PYTHON" logged "python /bad/python: unusable"
 eventually 5 "falls back to the remembered one" logged "python /usr/bin/true: gcloud loads"
@@ -151,66 +164,128 @@ stop
 
 # Fixtures with "shortestExpired" model a machine that has seen the session policy
 # bite before; without it nothing is predicted (see the "no lapse seen" scenario).
-scenario "manual mode: picks up a terminal login, warns before the lapse, learns from it" \
-    '{"sessionHours": 0.01, "shortestExpired": 3600, "renewAheadMinutes": 15, "autoLogin": false, "notify": true}'
+scenario "picks up a terminal login, warns before the lapse, learns from it" \
+    '{"sessionHours": 0.01, "shortestExpired": 3600, "warnAheadPercent": 50}'
 plant_login 10
 start
 eventually 5 "picks up the terminal login from gcloud's logs" state_has lastLogin
 expect "  … with the account from the log" test "$(st account)" = "$ACCT"
 eventually 8 "first probe finds the session working" logged "probe: valid"
-eventually 25 "warns inside the lead window before the estimated expiry" notified "gcloud login lapses at"
-expect "never logs in by itself in manual mode" test "$(calls 'auth login')" -eq 0
+eventually 15 "warns once the configured share of the session is left" notified "gcloud login lapses in [0-9]"
+expect "  … a notification to click for the login" logged "notify: gcloud login lapses in .*Click to log in again.* \\[click: login\\]"
+expect "never logs in by itself" test "$(calls 'auth login')" -eq 0
 echo reauth > "$T/probe"
 echo check > "$T/inbox"
-eventually 5 "announces the lapse" notified "gcloud login lapsed"
+eventually 5 "announces the lapse" notified "gcloud login lapsed — The session has ended.*Click to log in again"
+expect "  … still without opening a login" test "$(calls 'auth login')" -eq 0
 expect "learns a lower bound on the session length" between "$(st longestValid)" 5 60
 expect "learns an upper bound on the session length" between "$(st shortestExpired)" 15 60
 stop
 
-scenario "no lapse seen yet (no session policy?): no countdown, no early logins" \
-    '{"sessionHours": 0.01, "autoLogin": true, "notify": true}'
+scenario "no lapse seen yet (no session policy?): no countdown, no early notices" \
+    '{"sessionHours": 0.01}'
 plant_login 20
 start
 eventually 8 "the session is checked" logged "probe: valid"
 sleep 15
-expect "no login while the session keeps working past the 36s guess" test "$(calls 'auth login')" -eq 0
-expect "no heads-up either" not notified "gcloud login lapses at"
+expect "no heads-up while the session keeps working past the 36s guess" not notified "gcloud login lapses"
 echo reauth > "$T/probe"
 echo check > "$T/inbox"
-eventually 5 "an actual lapse still triggers the login" called "auth login --force"
+eventually 5 "an actual lapse is still announced" notified "gcloud login lapsed"
 stop
 
-scenario "auto mode: renews shortly before the estimated expiry" \
-    '{"sessionHours": 0.01, "shortestExpired": 3600, "renewAheadMinutes": 15, "autoLogin": true, "notify": true}'
+scenario "heads-up before the lapse: clicking it logs in, the renewal says when it lapses" \
+    '{"sessionHours": 0.01, "shortestExpired": 3600, "warnAheadPercent": 50}'
 plant_login 20
 start
-eventually 15 "starts gcloud auth login inside the lead window" called "auth login --force --quiet $ACCT --no-activate"
+eventually 8 "heads-up inside the warn window" notified "gcloud login lapses in"
+sleep 2
+expect "no login until the notification is clicked" test "$(calls 'auth login')" -eq 0
+echo click > "$T/inbox"
+eventually 3 "the click starts gcloud auth login" called "auth login --force --quiet $ACCT --no-activate"
 expect "  … while the session still worked" not logged "probe: reauth"
-eventually 5 "reports the renewal" notified "gcloud login renewed"
+eventually 5 "reports the renewal with the next lapse" notified "gcloud login renewed — Lapses ~[0-9:]* (in 36s)"
+expect "  … a notification to click for settings" logged "notify: gcloud login renewed — .*Click for settings. \\[click: settings\\]"
 expect "  … with the login page sent to the login browser (\$BROWSER = this app)" login_browser_is "$APP_BIN" "login"
 expect "  … and restarts the clock" test "$(st lastLogin)" \> "$PLANTED"
+echo click > "$T/inbox"
+eventually 3 "clicking the renewal notification opens Settings" logged "settings window: general tab, visible true"
 sleep 3
-expect "  … once, not in a loop" test "$(calls 'auth login')" -eq 1
+expect "one login, not a loop" test "$(calls 'auth login')" -eq 1
 expect "  … without touching ADC (Also renew ADC is off)" test "$(calls 'application-default')" -eq 0
 stop
 
-scenario "lapsed session: opens the login, gives up on an abandoned one, retries later" \
-    '{"autoLogin": true, "notify": true}'
+scenario "lapsed session: notifies, clicked login abandoned, click again to retry" \
+    '{}'
 echo reauth > "$T/probe"
 echo hang > "$T/login"
 start
-eventually 5 "starts a login as soon as the probe hits the reauth wall" called "auth login --force"
+eventually 5 "announces the lapse" notified "gcloud login lapsed"
+sleep 3
+expect "never opens the browser by itself" test "$(calls 'auth login')" -eq 0
+echo click > "$T/inbox"
+eventually 3 "the click starts the login" called "auth login --force"
 eventually 6 "kills the login nobody approved" logged "exit 15 (timed out)"
-expect "  … and says so" notified "gcloud login not completed"
+expect "  … and says so, click to try again" logged "notify: gcloud login not completed — .*Click to try again. \\[click: login\\]"
 expect "  … leaving no gcloud running" no_stray_gcloud
-sleep 5
-expect "does not reopen the browser straight away" test "$(calls 'auth login')" -eq 1
+sleep 3
+expect "no new login by itself" test "$(calls 'auth login')" -eq 1
 echo ok > "$T/login"
-eventually 20 "retries after the back-off" calls_at_least "auth login" 2
+echo click > "$T/inbox"
+eventually 3 "a click retries" calls_at_least "auth login" 2
 eventually 5 "the retry succeeds" notified "gcloud login renewed"
 stop
 
-scenario "menu: Log in now (clicked right at launch), then Cancel login" '{"autoLogin": false, "notify": true}'
+scenario "lapse detection when gcloud is used (no schedule)" \
+    '{"checkEveryMinutes": 0}'
+start
+eventually 8 "the launch check runs" logged "probe: valid"
+sleep 1
+base=$(probes)
+plant_use auth.print-access-token "--quiet: true, --scopes: \"https://www.googleapis.com/auth/cloud-platform\""
+plant_use config.get "account"
+sleep 2
+expect "GcloudBar's own probe and local commands don't count as use" test "$(probes)" -eq "$base"
+plant_use projects.describe "PROJECT_ID: \"p\""
+eventually 3 "another tool's gcloud run triggers a check" probes_above "$base"
+expect "  … logged as use" logged "gcloud used: projects.describe"
+echo reauth > "$T/probe"
+sleep 1
+plant_use container.clusters.list ""
+eventually 3 "the next use finds the lapse" notified "gcloud login lapsed"
+sleep 6
+n=$(notes "gcloud login lapsed")
+plant_use config.config-helper "--format: \"json\""
+eventually 3 "kubectl's config-helper is use; the lapse is announced again while in use" notes_above "gcloud login lapsed" "$n"
+sleep 4
+expect "no scheduled checks with the schedule off" test "$(grep -c 'probe:' "$T/app.log")" -le 4
+expect "never opens the browser by itself" test "$(calls 'auth login')" -eq 0
+stop
+
+scenario "lapse detection switches: on use off, on unlock on and off" \
+    '{"checkEveryMinutes": 0, "checkOnUse": false}'
+start
+eventually 8 "the launch check runs" logged "probe: valid"
+sleep 1
+base=$(probes)
+plant_use projects.describe ""
+sleep 2
+expect "with on-use off, gcloud use triggers nothing" test "$(probes)" -eq "$base"
+echo unlock > "$T/inbox"
+eventually 3 "unlocking the Mac triggers a check" probes_above "$base"
+stop
+scenario "lapse detection on unlock switched off" \
+    '{"checkEveryMinutes": 0, "checkOnUnlock": false}'
+start
+eventually 8 "the launch check runs" logged "probe: valid"
+sleep 1
+base=$(probes)
+echo unlock > "$T/inbox"
+sleep 2
+expect "unlocking the Mac triggers nothing" test "$(probes)" -eq "$base"
+stop
+
+scenario "menu: Log in now (clicked right at launch), then Cancel login" '{}'
 echo hang > "$T/login"
 echo login > "$T/inbox"
 start
@@ -223,18 +298,20 @@ expect "  … leaving no gcloud running" no_stray_gcloud
 stop
 
 scenario "Also renew ADC: keeps the impersonated service account" \
-    '{"autoLogin": true, "renewADC": true, "notify": true}'
+    '{"renewADC": true}'
 echo reauth > "$T/probe"
 printf '{"type": "impersonated_service_account", "service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/%s:generateAccessToken", "source_credentials": {}, "delegates": []}' \
     "$AGENT_SA" > "$T/cfg/application_default_credentials.json"
 start
-eventually 8 "renews the gcloud login first" called "auth login --force"
+eventually 5 "announces the lapse" notified "gcloud login lapsed"
+echo click > "$T/inbox"
+eventually 8 "the click renews the gcloud login first" called "auth login --force"
 eventually 5 "then ADC, impersonating the same SA" called "auth application-default login --quiet --impersonate-service-account=$AGENT_SA"
 eventually 5 "reports both" logged "notify: gcloud login renewed — .*ADC renewed too"
 expect "  … the ADC login page goes to the login browser too" login_browser_is "$APP_BIN" "application-default"
 stop
 
-scenario "login browser not installed: gcloud's default browser" '{"autoLogin": false, "notify": true}'
+scenario "login browser not installed: gcloud's default browser" '{}'
 echo login > "$T/inbox"
 LOGIN_BROWSER=invalid.example.no-such-browser start
 eventually 5 "Log in now runs gcloud auth login" called "auth login --force"
@@ -242,11 +319,43 @@ expect "  … without overriding \$BROWSER" login_browser_is "<unset>" "login"
 stop
 
 scenario "Open logins in … switched off: gcloud's default browser" \
-    '{"autoLogin": false, "notify": true, "useLoginBrowser": false}'
+    '{"useLoginBrowser": false}'
 echo login > "$T/inbox"
 start
 eventually 5 "Log in now runs gcloud auth login" called "auth login --force"
 expect "  … without overriding \$BROWSER" login_browser_is "<unset>" "login"
+stop
+
+scenario "update check: a newer release is announced once; clicking opens its page" '{}'
+printf '{"tag_name": "v99.0.0", "html_url": "https://github.com/michieltimmerman/gcloudbar/releases/tag/v99.0.0"}' \
+    > "$T/release.json"
+UPDATE_URL="file://$T/release.json" start
+eventually 5 "looks up the latest release" logged "update check: latest 99.0.0"
+eventually 2 "  … announces it" notified "GcloudBar 99.0.0 is available — You have .*Click to open the release page. \\[click: update\\]"
+expect "  … and remembers it" test "$(st latestVersion)" = "99.0.0"
+echo click > "$T/inbox"
+eventually 3 "clicking opens the release page" logged "opening https://github.com/michieltimmerman/gcloudbar/releases/tag/v99.0.0"
+echo "check updates" > "$T/inbox"
+eventually 3 "Check now looks again" bash -c "test \$(grep -c 'update check: latest' '$T/app.log') -ge 2"
+expect "  … without announcing the same version twice" test "$(notes 'GcloudBar 99.0.0 is available')" -eq 1
+stop
+
+scenario "update check: an older release, a failed check, switched off" '{}'
+printf '{"tag_name": "v0.0.1", "html_url": "https://example.invalid/r"}' > "$T/release.json"
+UPDATE_URL="file://$T/release.json" start
+eventually 5 "an older release" logged "update check: latest 0.0.1"
+expect "  … is not announced" not notified "is available"
+stop
+scenario "update check: no answer" '{}'
+start
+eventually 5 "a failed check is logged" logged "update check failed"
+expect "  … quietly" not notified "is available"
+stop
+scenario "update check: switched off" '{"checkUpdates": false}'
+start
+eventually 8 "first probe" logged "probe: valid"
+sleep 2
+expect "no update check" not logged "update check"
 stop
 
 scenario "\$BROWSER hand-off: GcloudBar <url> opens it via LaunchServices" '{}'
@@ -258,7 +367,7 @@ expect "in the default browser otherwise" test "$out" = "open $url"
 rm -rf "$T"
 
 scenario "gcloud without the hidden --scopes flag: documented config-helper fallback" \
-    '{"autoLogin": false, "notify": true}'
+    '{}'
 touch "$T/no_scopes"
 start
 eventually 8 "falls back to config-helper --force-auth-refresh" called "config config-helper --force-auth-refresh"
@@ -268,13 +377,13 @@ echo check > "$T/inbox"
 eventually 8 "  … and still sees a lapse right away" logged "probe: reauth"
 stop
 
-scenario "a reworded lapse is still recognised (OAuth error code)" '{"autoLogin": false, "notify": true}'
+scenario "a reworded lapse is still recognised (OAuth error code)" '{}'
 echo reauth_reworded > "$T/probe"
 start
 eventually 8 "classified as the session lapse, not as revoked" logged "probe: reauth"
 stop
 
-scenario "Settings window opens on either tab" '{"autoLogin": false, "notify": true}'
+scenario "Settings window opens on either tab" '{}'
 start
 eventually 8 "first probe" logged "probe: valid"
 echo settings > "$T/inbox"
@@ -285,21 +394,22 @@ stop
 
 scenario "command line: --help and bad values" '{}'
 out=$("$APP_BIN" --help)
-expect "--help lists the settings" grep -q -- "--renew-ahead DURATION" <<< "$out"
-"$APP_BIN" --renew-ahead soon > /dev/null 2>&1
+expect "--help lists the settings" grep -q -- "--warn-ahead PERCENT" <<< "$out"
+"$APP_BIN" --warn-ahead 90 > /dev/null 2>&1
 expect "a bad value is refused (exit 2)" test $? -eq 2
 "$APP_BIN" --no-such-flag > /dev/null 2>&1
 expect "an unknown option is refused (exit 2)" test $? -eq 2
 rm -rf "$T"
 
-scenario "arguments override settings for one run and are not saved" '{"autoLogin": true, "notify": true}'
-echo reauth > "$T/probe"
-start --auto-renew off --renew-ahead 2h
-eventually 8 "the lapse is seen" logged "probe: reauth"
+scenario "arguments override settings for one run and are not saved" '{"checkEveryMinutes": 10}'
+start --check-every off --check-on-use off --warn-ahead 20
+eventually 8 "the launch check runs" logged "probe: valid"
+sleep 7
+expect "--check-every off: no scheduled check (5s at 120x)" test "$(probes)" -eq 1
+plant_use projects.describe ""
 sleep 2
-expect "--auto-renew off: no login opened" test "$(calls 'auth login')" -eq 0
-expect "  … a notification instead, as in manual mode" notified "gcloud login lapsed"
-expect "  … and the saved setting is untouched" test "$(st autoLogin)" = "True"
+expect "--check-on-use off: use triggers nothing" test "$(probes)" -eq 1
+expect "  … and the saved settings are untouched" test "$(st checkEveryMinutes)" = "10"
 stop
 
 scenario "--compat checks a gcloud install" '{}'
@@ -326,7 +436,7 @@ expect "losing some lapse markers is only a warning" grep -q "warn  the session 
 expect "no SDK there: exit 2" test $? -eq 2
 rm -rf "$T"
 
-scenario "the app checks its gcloud at launch and notifies once" '{"autoLogin": false, "notify": true}'
+scenario "the app checks its gcloud at launch and notifies once" '{}'
 make_fake_sdk "$T/sdk"
 sed -i '' "/'--activate'/d" "$T/sdk/lib/surface/auth/login.py"
 GCLOUD="$T/sdk/bin/gcloud" start
@@ -335,7 +445,7 @@ eventually 3 "  … notifies" notified "gcloud 9.9.9 changed something GcloudBar
 expect "  … and remembers that version" test "$(st compatNotified)" = "9.9.9"
 stop
 
-scenario "revoked credentials count as lapsed" '{"autoLogin": false, "notify": true}'
+scenario "revoked credentials count as lapsed" '{}'
 echo revoked > "$T/probe"
 start
 eventually 5 "probe reports revoked" logged "probe: revoked"
@@ -343,7 +453,7 @@ eventually 3 "announces it" notified "gcloud login lapsed"
 stop
 
 scenario "offline: a failed check never triggers a login" \
-    '{"sessionHours": 0.01, "autoLogin": true, "notify": true}'
+    '{"sessionHours": 0.01}'
 echo fail > "$T/probe"
 start
 eventually 5 "probe reports the failure" logged "probe: failed"
@@ -352,7 +462,7 @@ expect "no login attempted" test "$(calls 'auth login')" -eq 0
 eventually 15 "says so once the checks keep failing" notified "GcloudBar can't check your gcloud login"
 stop
 
-scenario "gcloud's Python vanishes while running (mise/pyenv upgrade)" '{"autoLogin": false, "notify": true}'
+scenario "gcloud's Python vanishes while running (mise/pyenv upgrade)" '{}'
 printf '#!/bin/sh\n' > "$T/python3" && chmod +x "$T/python3"
 PY="$T/python3" start
 eventually 8 "first probe works" logged "probe: valid"
@@ -362,7 +472,7 @@ eventually 8 "the check sees gcloud can't start" logged "probe: broken"
 eventually 10 "and looks for gcloud and a Python again" bash -c "test \$(grep -c 'toolchain gcloud=' '$T/app.log') -ge 2"
 stop
 
-scenario "no check runs while a login is open" '{"autoLogin": false, "notify": true}'
+scenario "no check runs while a login is open" '{}'
 echo hang > "$T/login"
 start
 eventually 8 "first probe" logged "probe: valid"
@@ -376,7 +486,7 @@ echo cancel > "$T/inbox"
 stop
 
 scenario "another account's login is ignored; switching accounts starts over" \
-    '{"autoLogin": false, "notify": true}'
+    '{}'
 plant_login 30
 OTHER_PLANTED=""
 plant_login 5 "other@example.com"
@@ -392,7 +502,7 @@ eventually 8 "after switching, the new account's login counts" test_last_login_i
 expect "  … for the new account" test "$(st account)" = "other@example.com"
 stop
 
-scenario "quitting the app stops an open login" '{"autoLogin": false, "notify": true}'
+scenario "quitting the app stops an open login" '{}'
 echo hang > "$T/login"
 start
 eventually 8 "first probe" logged "probe: valid"

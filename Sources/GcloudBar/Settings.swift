@@ -46,7 +46,7 @@ struct SettingsView: View {
         }
         // A grouped Form scrolls and has no ideal height of its own; without a
         // fixed size the window shrinks to the tab bar.
-        .frame(width: 560, height: 620)
+        .frame(width: 560, height: 840)
         .padding(.top, 8)
     }
 }
@@ -54,24 +54,23 @@ struct SettingsView: View {
 private struct GeneralSettings: View {
     @ObservedObject var monitor: Monitor
 
-    private let aheadChoices: [(minutes: Double, label: String)] =
-        [(15, "15 minutes"), (30, "30 minutes"), (60, "1 hour"), (120, "2 hours"), (240, "4 hours")]
+    private let percentChoices: [Double] = [5, 10, 15, 20, 25]
+    private let scheduleChoices: [(minutes: Double, label: String)] =
+        [(0, "Off"), (5, "Every 5 minutes"), (10, "Every 10 minutes"), (15, "Every 15 minutes"),
+         (30, "Every 30 minutes"), (60, "Every hour")]
 
     var body: some View {
         Form {
             Section {
-                Toggle("Renew automatically", isOn: effective(overrides.autoRenew, $monitor.state.autoLogin))
-                    .disabled(overrides.autoRenew != nil)
-                ArgumentNote(flag: "--auto-renew", active: overrides.autoRenew != nil)
-                Picker("Renew ahead of expiry",
-                       selection: effective(overrides.renewAheadMinutes, $monitor.state.renewAheadMinutes)) {
-                    ForEach(aheadChoices, id: \.minutes) { Text($0.label).tag($0.minutes) }
-                    if let m = overrides.renewAheadMinutes, !aheadChoices.contains(where: { $0.minutes == m }) {
-                        Text(hms(m * 60)).tag(m)
+                Picker("Notify before the lapse",
+                       selection: effective(overrides.warnAheadPercent, $monitor.state.warnAheadPercent)) {
+                    ForEach(percentChoices, id: \.self) { Text(percentLabel($0)).tag($0) }
+                    if let p = overrides.warnAheadPercent, !percentChoices.contains(p) {
+                        Text(percentLabel(p)).tag(p)
                     }
                 }
-                .disabled(overrides.renewAheadMinutes != nil)
-                ArgumentNote(flag: "--renew-ahead", active: overrides.renewAheadMinutes != nil)
+                .disabled(overrides.warnAheadPercent != nil)
+                ArgumentNote(flag: "--warn-ahead", active: overrides.warnAheadPercent != nil)
                 Picker("Session length until learned",
                        selection: effective(overrides.sessionHours, $monitor.state.sessionHours)) {
                     ForEach([8.0, 12, 16, 20, 24], id: \.self) { Text("\(Int($0)) hours").tag($0) }
@@ -89,10 +88,29 @@ private struct GeneralSettings: View {
                 }
             } header: {
                 Text("Renewal")
-            } footer: {
-                Text("Renewal opens a browser login for you to approve, and only while you're at the "
-                     + "Mac. Renewing well ahead keeps an agent working after you walk away.")
-                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Toggle("When gcloud is used", isOn: effective(overrides.checkOnUse, Binding(
+                    get: { monitor.state.checkOnUse },
+                    set: { monitor.state.checkOnUse = $0; monitor.watchUsage() })))
+                    .disabled(overrides.checkOnUse != nil)
+                ArgumentNote(flag: "--check-on-use", active: overrides.checkOnUse != nil)
+                Picker("On a schedule",
+                       selection: effective(overrides.checkEveryMinutes, $monitor.state.checkEveryMinutes)) {
+                    ForEach(scheduleChoices, id: \.minutes) { Text($0.label).tag($0.minutes) }
+                    if let m = overrides.checkEveryMinutes, !scheduleChoices.contains(where: { $0.minutes == m }) {
+                        Text("Every \(hms(m * 60))").tag(m)
+                    }
+                }
+                .disabled(overrides.checkEveryMinutes != nil)
+                ArgumentNote(flag: "--check-every", active: overrides.checkEveryMinutes != nil)
+                Toggle("When you log in to, unlock or wake the Mac",
+                       isOn: effective(overrides.checkOnUnlock, $monitor.state.checkOnUnlock))
+                    .disabled(overrides.checkOnUnlock != nil)
+                ArgumentNote(flag: "--check-on-unlock", active: overrides.checkOnUnlock != nil)
+            } header: {
+                Text("Lapse detection")
             }
 
             Section("Login page") {
@@ -105,19 +123,33 @@ private struct GeneralSettings: View {
             }
 
             Section {
-                Toggle(monitor.adcTarget.map { "Also renew ADC (as \($0))" } ?? "Also renew ADC",
+                Toggle(monitor.adcTarget.map { "Also renew Application Default Credentials (as \($0))" }
+                           ?? "Also renew Application Default Credentials",
                        isOn: effective(overrides.renewADC, $monitor.state.renewADC))
                     .disabled(overrides.renewADC != nil)
                 ArgumentNote(flag: "--renew-adc", active: overrides.renewADC != nil)
-            } footer: {
-                Text("Application Default Credentials have their own session: a second browser approval.")
-                    .foregroundStyle(.secondary)
             }
 
             Section {
-                Toggle("Notifications", isOn: effective(overrides.notifications, $monitor.state.notify))
-                    .disabled(overrides.notifications != nil)
-                ArgumentNote(flag: "--notifications", active: overrides.notifications != nil)
+                Toggle("Check for updates", isOn: effective(overrides.checkUpdates, $monitor.state.checkUpdates))
+                    .disabled(overrides.checkUpdates != nil)
+                ArgumentNote(flag: "--check-updates", active: overrides.checkUpdates != nil)
+                LabeledContent("GcloudBar \(version)") {
+                    HStack {
+                        Text(monitor.updateStatus ?? monitor.availableUpdate.map { "\($0.version) is available" }
+                             ?? monitor.state.lastUpdateCheck.map { "Checked \(clock($0))" } ?? "Not checked yet")
+                            .foregroundStyle(.secondary)
+                        if let u = monitor.availableUpdate {
+                            Button("Release page") { Updates.open(u.page) }
+                        }
+                        Button("Check now") { monitor.checkForUpdates() }
+                    }
+                }
+            } header: {
+                Text("Updates")
+            }
+
+            Section {
                 Toggle("Launch at login", isOn: Binding(
                     get: { monitor.launchAtLogin },
                     set: { monitor.setLaunchAtLogin($0) }))
@@ -135,6 +167,11 @@ private struct GeneralSettings: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// "10% (~1h36m)" of the current session-length estimate.
+    private func percentLabel(_ p: Double) -> String {
+        "\(Int(p))% left (~\(hms(monitor.state.sessionLength * p / 100)))"
     }
 
     private var version: String {

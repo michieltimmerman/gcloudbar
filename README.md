@@ -69,7 +69,7 @@ run fine when built locally.
 |------------|--------------------------------------------------------------|
 | `🔑 9h12m` | session works; estimated time left                           |
 | `🔑`       | session works; no lapse seen yet, so nothing to predict      |
-| `⚠️ 12m`   | inside the renewal window (Settings → Renew ahead of expiry) |
+| `⚠️ 12m`   | inside the notice window (Settings → Notify before the lapse) |
 | `🔑 ~`     | past the estimate, but a check still got a token             |
 | `🔒`       | lapsed or revoked: needs a browser login                     |
 | `⏳`       | a login is open in your browser                              |
@@ -82,13 +82,19 @@ last check. Its items are **Log in now** (or **Cancel login**), **Check now**,
 ## Settings
 
 **General** tab:
-- **Renew automatically.**
-- **Renew ahead of expiry:** 15 minutes to 4 hours; 1 hour by default.
+- **Notify before the lapse:** when 5–25% of the session is left; 10% by
+  default (about 1h36m of a 16h session).
 - **Session length until learned:** the guess used until a lapse has been seen.
 - **Forget:** clears what has been learned, for example after the policy changed.
+- **Lapse detection:** **When gcloud is used** (on by default), **On a schedule**
+  (off, or every 5 minutes to every hour; 10 minutes by default) and **When you
+  log in to, unlock or wake the Mac** (on by default).
 - **Open login pages in:** any installed browser, or the default browser.
-- **Also renew ADC.**
-- **Notifications.**
+- **Also renew Application Default Credentials.**
+- **Check for updates**, with **Check now**: once a day GcloudBar asks GitHub
+  for the latest release. A newer version is announced once, in a notification
+  and in the menu; clicking either opens its release page. Nothing is downloaded
+  or installed.
 - **Launch at login.**
 
 **gcloud** tab:
@@ -105,18 +111,20 @@ argument wins over the Settings window, is shown there greyed out ("Set by …
 for this run"), and is never saved:
 
 ```sh
-open -a GcloudBar --args --renew-ahead 2h --login-browser default
+open -a GcloudBar --args --warn-ahead 20 --check-every off --login-browser default
 ~/Applications/GcloudBar.app/Contents/MacOS/GcloudBar --help
 ```
 
 | Argument | Setting |
 |---|---|
-| `--auto-renew on\|off` | Renew automatically |
-| `--renew-ahead DURATION` | Renew ahead of expiry, e.g. `30m`, `2h`, `1h30m` |
+| `--warn-ahead PERCENT` | Notify before the lapse, 1–50, e.g. `10` |
+| `--check-on-use on\|off` | Lapse detection: when gcloud is used |
+| `--check-every DURATION\|off` | Lapse detection: on a schedule, e.g. `10m`, `1h` |
+| `--check-on-unlock on\|off` | Lapse detection: when you log in to, unlock or wake the Mac |
 | `--session-length DURATION` | Session length until learned, e.g. `16h` |
 | `--login-browser ID\|default` | Open login pages in (a bundle id, or the default browser) |
-| `--renew-adc on\|off` | Also renew ADC |
-| `--notifications on\|off` | Notifications |
+| `--check-updates on\|off` | Check for updates |
+| `--renew-adc on\|off` | Also renew Application Default Credentials |
 | `--gcloud PATH`, `--python PATH`, `--gcloud-config DIR` | the gcloud tab's overrides |
 
 Commands that print something and exit:
@@ -138,44 +146,55 @@ length**.
   session works again.
 - **Per account:** switching gcloud's active account starts over, since a
   different account may have a different policy.
-- **Session length** starts at the menu's guess (16h by default). Every 10 minutes
-  a check runs `gcloud auth print-access-token --scopes=…`. The hidden `--scopes`
+- **Session length** starts at the menu's guess (16h by default). A check runs `gcloud auth print-access-token --scopes=…`. The hidden `--scopes`
   flag forces a real refresh without touching gcloud's token cache, and the token
-  printed on stdout is discarded unread. Each check narrows the real length:
+  printed on stdout is discarded unread. Checks run when gcloud is used, on the
+  schedule, and when you log in to, unlock or wake the Mac (see below). Each check narrows the real length:
   "still worked at age A" and "lapsed by age B". The estimate is the menu value
   clamped into [A, B].
 - **No policy, no predictions.** Without session control a refresh token never
   lapses. So GcloudBar predicts nothing until it has seen one real lapse. Until
   then it only reacts when the session actually lapses, and never prompts early.
 
-## When it logs you in
+## Notifications and logging in
 
-With **Renew automatically** on, it runs
-`gcloud auth login --force <account> --no-activate`. That happens an hour before
-the estimated expiry (Settings → **Renew ahead of expiry**), or as soon as a check
-finds the session lapsed. It only happens while someone is at the Mac: screen
-unlocked, input in the last 2 minutes.
+GcloudBar never opens the browser by itself. It notifies, and clicking the
+notification runs `gcloud auth login --force <account> --no-activate`:
 
-Renewing well ahead matters when an agent keeps using gcloud after you've walked
-away: only you can approve the renewal, so it is best done while you're still
-there.
+- **Before the lapse**, once the configured share of the session is left
+  (Settings → **Notify before the lapse**, 10% by default): "gcloud login lapses
+  in 1h36m", with the expected time. Once per login.
+- **When a check finds the session lapsed** (or the credentials revoked): "gcloud
+  login lapsed". Once per lapse, and again (at most every 10 minutes) when gcloud
+  is used while it is still lapsed.
+- **After a login**: "gcloud login renewed", with when the new session lapses.
+  Clicking it opens Settings.
+- A login that fails or that nobody approves says so; click it to try again.
+
+**Log in now** in the menu does the same as clicking a notification.
+
+**Lapse detection on use.** Every gcloud run writes a log under
+`<gcloud config dir>/logs/`, naming its command. GcloudBar watches that folder,
+so it sees gcloud used from a terminal, by kubectl's `gke-gcloud-auth-plugin`
+or by an agent, without a wrapper. Local-only commands (`config get`, `auth
+list`, …), logins and GcloudBar's own checks don't count, and a check runs at most
+once a minute. Tools that use Application Default Credentials without calling
+gcloud (Terraform, client libraries) leave no log, so the schedule still matters
+for them.
 
 - The login page opens in **Google Chrome** when it's installed, and in your
   default browser otherwise (menu: **Open logins in Google Chrome**). gcloud
   opens its page through Python's `webbrowser`, so GcloudBar sets `$BROWSER` to
   itself and passes the URL to `open -b com.google.Chrome`. That avoids
   Python's AppleScript route, which would trigger a macOS Automation prompt.
-- A lapse that happens overnight is renewed when you unlock in the morning.
-- A login nobody approves is stopped after 5 minutes. It is retried after 30
-  minutes, or when you unlock or wake the Mac. A display waking up doesn't
-  count, so nudging the mouse won't reopen it.
+- A lapse that happens overnight is announced when you unlock in the morning.
+- A login nobody approves is stopped after 5 minutes.
 - No check runs while a login is open. Quitting GcloudBar stops an open login.
 - If checks keep failing for half an hour (offline, gcloud broken), you get one
   notification saying why. If gcloud's Python disappears, for example after a
   mise or pyenv upgrade, it finds another by itself.
-- With it off, you get notifications before and at the lapse instead.
 
-**Also renew ADC** runs `gcloud auth application-default login` after the gcloud
+**Also renew Application Default Credentials** runs `gcloud auth application-default login` after the gcloud
 login. That is a second browser approval, because Application Default
 Credentials are a separate OAuth client with their own session. If your ADC file
 impersonates a service account, the renewal keeps it, including any delegation
@@ -301,7 +320,7 @@ tests/real-smoke.sh [service-account]
 
   It never touches your gcloud config.
 - **`tests/real-smoke.sh`** runs the installed app once against your real gcloud,
-  with its own state file and auto-renew off. It diffs your gcloud config dir
+  with its own state file and banners off. It diffs your gcloud config dir
   before and after: hashes of the config files, and only mtime and size of the
   credential files, which are never opened. It exits non-zero unless the check
   got a real answer from Google and nothing outside the token cache changed.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Smoke test against the real gcloud and the real login, changing nothing:
-#   - its own state file with auto-renew off, so no browser ever opens;
+#   - its own state file, banners off (GcloudBar never opens a browser itself);
 #   - a GUI-like bare environment, so gcloud/Python discovery is exercised;
 #   - a before/after fingerprint of the gcloud config dir: content hashes of the
 #     configuration files, and only mtime + size of the credential files, which
@@ -27,7 +27,7 @@ fingerprint() {
 }
 
 before=$(fingerprint)
-printf '{"autoLogin": false, "notify": false}' > "$T/state.json"
+printf '{"checkUpdates": false}' > "$T/state.json"
 env -i HOME="$HOME" USER="$USER" LOGNAME="$USER" SHELL=/bin/zsh TMPDIR="${TMPDIR:-/tmp}" \
     PATH=/usr/bin:/bin:/usr/sbin:/sbin ${CLOUDSDK_CONFIG:+CLOUDSDK_CONFIG="$CLOUDSDK_CONFIG"} \
     GCLOUDBAR_STATE="$T/state.json" GCLOUDBAR_PROBE_SA="$SA" GCLOUDBAR_DEBUG=1 GCLOUDBAR_NO_BANNERS=1 \

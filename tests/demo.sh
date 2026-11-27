@@ -16,7 +16,7 @@ mkdir -p "$T/cfg/logs"
 echo demo@example.com > "$T/account"
 echo valid > "$T/probe"
 echo ok > "$T/login"
-printf '{"account": "demo@example.com", "autoLogin": true, "notify": true, "lastLogin": "%s", "shortestExpired": 57600, "longestValid": 10800}' \
+printf '{"account": "demo@example.com", "checkUpdates": false, "lastLogin": "%s", "shortestExpired": 57600, "longestValid": 10800}' \
     "$(date -u -v-3H -v-1M +%Y-%m-%dT%H:%M:%SZ)" > "$T/state.json"
 
 echo "GcloudBar demo running (demo@example.com). Click its menu bar item; Ctrl-C to stop."
