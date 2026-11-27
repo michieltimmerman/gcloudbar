@@ -10,6 +10,10 @@
 # keychain has one (or CODESIGN_IDENTITY names one), otherwise ad-hoc — never
 # with an Apple Development certificate, whose signature carries the developer's
 # personal Apple ID into every download.
+#
+# Releases live on GitHub, so the remote whose URL contains github.com is used,
+# whatever it is called (a clone with more remotes, or none named origin, still
+# works). REMOTE=<name> picks one.
 set -euo pipefail
 
 LOCAL=0
@@ -31,9 +35,15 @@ git rev-parse --git-dir > /dev/null 2>&1 || die "not a git repository"
 branch=$(git rev-parse --abbrev-ref HEAD)
 [ "$branch" = main ] || die "on '$branch'; releases are cut from main"
 git rev-parse -q --verify "refs/tags/$TAG" > /dev/null && die "tag $TAG already exists"
-git fetch -q origin main
-[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] \
-    || die "main differs from origin/main; push or pull first"
+REMOTE="${REMOTE:-$(git remote -v | awk '$2 ~ /github\.com/ {print $1; exit}')}"
+[ -n "$REMOTE" ] || die "no GitHub remote (none has github.com in its URL); set REMOTE=<name>"
+REMOTE_URL=$(git remote get-url "$REMOTE" 2> /dev/null) || die "no such remote: $REMOTE"
+[[ "$REMOTE_URL" == *github.com* ]] || die "remote '$REMOTE' is not a GitHub remote ($REMOTE_URL)"
+GH_REPO=$(sed -E 's#^.*github\.com[:/]+##; s#/$##; s#\.git$##' <<< "$REMOTE_URL")
+[[ "$GH_REPO" =~ ^[^/]+/[^/]+$ ]] || die "cannot read owner/repo from '$REMOTE_URL'"
+git fetch -q "$REMOTE" main
+[ "$(git rev-parse HEAD)" = "$(git rev-parse "$REMOTE/main")" ] \
+    || die "main differs from $REMOTE/main; push or pull first"
 
 echo "→ build and end-to-end tests"
 packaging/build.sh
@@ -41,9 +51,9 @@ tests/e2e.sh
 
 if [ "$LOCAL" = 0 ]; then
     git tag -a "$TAG" -m "GcloudBar $VERSION"
-    git push origin "$TAG"
+    git push "$REMOTE" "$TAG"
     echo "→ pushed $TAG; GitHub Actions builds and publishes the release:"
-    echo "  $(gh browse --no-browser 2>/dev/null)/actions/workflows/release.yml"
+    echo "  https://github.com/$GH_REPO/actions/workflows/release.yml"
     exit 0
 fi
 
@@ -67,5 +77,5 @@ This build is not notarized. On first launch macOS will refuse to open it: open
 gh release create "$TAG" dist/GcloudBar.zip dist/GcloudBar.zip.sha256 \
     --target "$(git rev-parse HEAD)" --title "GcloudBar $VERSION" \
     --notes "$notes" --generate-notes
-git fetch -q --tags origin
+git fetch -q --tags "$REMOTE"
 echo "→ published $TAG"

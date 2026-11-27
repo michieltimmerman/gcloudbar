@@ -391,16 +391,25 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     private(set) var lastAction: NoteAction?
 
     func requestAuthorization() {
-        guard Bundle.main.bundleIdentifier != nil, appEnv["GCLOUDBAR_NO_BANNERS"] != "1" else { return }
+        guard Bundle.main.bundleIdentifier != nil else {
+            debug("notifications: osascript (no app bundle)")
+            return
+        }
+        guard appEnv["GCLOUDBAR_NO_BANNERS"] != "1" else { return }
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         center.requestAuthorization(options: [.alert, .sound]) { granted, error in
             // An error means macOS refuses the app this route (seen for an app
             // under /private/tmp, whatever its signature); no error and no grant
             // means the user said no.
+            let declined = !granted && error == nil
+            debug(granted ? "notifications: UNUserNotificationCenter"
+                : declined ? "notifications: declined by the user"
+                : "notifications: NSUserNotificationCenter (native refused: "
+                    + "\(error.map { String(describing: $0) } ?? ""))")
             DispatchQueue.main.async {
                 self.useNative = granted
-                self.declined = !granted && error == nil
+                self.declined = declined
             }
         }
     }
@@ -432,6 +441,8 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         proc.arguments = ["-e", "on run argv",
                           "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
                           "-e", "end run", "--", title, body]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
         try? proc.run()
     }
 
